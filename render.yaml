@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: ai-whatsapp-assistant
+    env: node
+    plan: free
+    repo: https://github.com/<your-repo>/ai-whatsapp-assistant
+    branch: main
+    buildCommand: "npm ci"
+    startCommand: "node index.js"
