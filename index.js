@@ -1,68 +1,81 @@
-const express = require('express');
-const bodyParser = require('body-parser');
-const helmet = require('helmet');
-const pino = require('pino');
-const axios = require('axios');
-const { askOpenAI } = require('./workers/openai');
+import express from "express";
+import bodyParser from "body-parser";
+import axios from "axios";
+import OpenAI from "openai";
 
-const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 const app = express();
-app.use(helmet());
-app.use(bodyParser.json({ limit: '1mb' }));
+app.use(bodyParser.json());
 
-const VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN;
+// Environment variables
+const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || "mybotverify";
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
+const OPENAI_KEY = process.env.OPENAI_API_KEY;
 
-app.get('/', (req, res) => res.send('AI WhatsApp Assistant — ok'));
+// Initialize OpenAI client
+const client = new OpenAI({ apiKey: OPENAI_KEY });
 
-app.get('/webhook', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-    logger.info('Webhook verified');
-    return res.status(200).send(challenge);
+// Webhook verification
+app.get("/webhook", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (mode && token) {
+    if (mode === "subscribe" && token === VERIFY_TOKEN) {
+      console.log("✅ Webhook verified!");
+      res.status(200).send(challenge);
+    } else {
+      res.sendStatus(403);
+    }
   }
-  return res.sendStatus(403);
 });
 
-app.post('/webhook', async (req, res) => {
-  res.sendStatus(200);
+// Handle incoming WhatsApp messages
+app.post("/webhook", async (req, res) => {
   try {
-    const changes = req.body.entry?.[0]?.changes?.[0];
-    const messages = changes?.value?.messages;
-    if (!messages || !messages.length) return;
+    const entry = req.body.entry?.[0]?.changes?.[0]?.value;
+    const message = entry?.messages?.[0];
 
-    const msg = messages[0];
-    const from = msg.from;
-    const text = msg.text?.body || msg?.button?.text || null;
-    if (!text) {
-      logger.info('No text payload, skipping');
-      return;
+    if (message) {
+      const from = message.from; // User's WhatsApp number
+      const text = message.text?.body;
+
+      console.log(`💬 Received: "${text}" from ${from}`);
+
+      // Ask GPT for a response
+      const gptReply = await client.chat.completions.create({
+        model: "gpt-3.5-turbo",
+        messages: [{ role: "user", content: text }],
+      });
+
+      const replyText =
+        gptReply.choices[0]?.message?.content || "Sorry, I couldn’t generate a reply.";
+
+      // Send reply back to WhatsApp
+      await axios.post(
+        "https://graph.facebook.com/v21.0/me/messages",
+        {
+          messaging_product: "whatsapp",
+          to: from,
+          text: { body: replyText },
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+
+      console.log(`🤖 Replied: "${replyText}"`);
     }
 
-    logger.info({ from, text }, 'Received message');
-
-    const aiReply = await askOpenAI(text);
-    if (!aiReply) {
-      logger.warn('Empty AI reply');
-      return;
-    }
-
-    await axios.post(
-      `https://graph.facebook.com/v17.0/${process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || 'me'}/messages`,
-      {
-        messaging_product: 'whatsapp',
-        to: from,
-        text: { body: aiReply }
-      },
-      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
-    );
-    logger.info('Replied to user');
+    res.sendStatus(200);
   } catch (err) {
-    logger.error({ err: err?.message || err }, 'Processing error');
+    console.error("❌ Error:", err.response?.data || err.message);
+    res.sendStatus(500);
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => logger.info(`Server listening on ${PORT}`));
+// Start server
+app.listen(10000, () => console.log("🚀 Server is running on port 10000"));
